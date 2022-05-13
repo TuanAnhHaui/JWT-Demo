@@ -1,171 +1,88 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"github.com/dgrijalva/jwt-go"
-	"github.com/gorilla/mux"
-	"github.com/jinzhu/gorm"
-	"golang.org/x/crypto/bcrypt"
+	"github.com/gin-gonic/gin"
 	"log"
 	"net/http"
+	"os"
 	"time"
 )
 
 var (
-	router *mux.Router
-	secretkey string ="secretkeyjwt"
+	router = gin.Default()
 )
 
-
-
-func CreateRouter() {
-	router = mux.NewRouter()
-}
-func InitializeRoute() {
-	router.HandleFunc("/signup", SignUp).Methods("POST")
-	router.HandleFunc("/signin", SignIn).Methods("POST")
+func main() {
+	router.POST("/login", Login)
+	log.Fatal(router.Run(":8080"))
 }
 
 type User struct {
-	gorm.Model
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Password string `json:"-"`
-	Role     string `json:"role"`
-}
-type Authentication struct {
-	Email    string `json:"email"`
-	Password string `json:"-"`
-}
-type Token struct {
-	Role        string `json:"role"`
-	Email       string `json:"email"`
-	TokenString string `json:"token"`
-}
-type Error struct {
-	IsError bool `json:"isError"`
-	Message string `json:"message"`
+	ID       uint64 `json:"id"`
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
-//set error message in Error struct
-func SetError(err Error, message string) Error {
-	err.IsError = true
-	err.Message = message
-	return err
-}
-func GetDatabase() *gorm.DB {
-	databasename := "userdb"
-	database := "postgres"
-	databasepassword := "babygetmygun98"
-	databaseurl := "postgres://postgres:" + databasepassword + "@localhost/" + databasename + "?sslmode=disable"
-	connection, err := gorm.Open(database, databaseurl)
-	if err != nil {
-		log.Fatal("Invalid database url ")
-	}
-	sqldb := connection.DB
-
-	err = sqldb.Ping()
-	if err != nil {
-		log.Fatal("database connected")
-	}
-	fmt.Println("Database connection successful")
-	return connection
-}
-func InitialMigration() {
-	connection := GetDatabase()
-	defer Closedatabase(connection)
-	connection.AutoMigrate(User{})
-}
-func Closedatabase(connection *gorm.DB) {
-	sqldb := connection.DB()
-	sqldb.Close()
-}
-func GeneratehashPassword(password string) (string,error) {
-	bytes,err :=bcrypt.GenerateFromPassword([]byte(password),14)
-	return string(bytes),err
-}
-func CheckPasswordHash(password ,hash string) bool {
-	err :=bcrypt.CompareHashAndPassword([]byte(hash),[]byte(password))
-	return err == nil
-}
-//GenerateJWT
-func GenerateJWT(email,role string)(string,error){
-	var mySigningKey =[]byte(secretkey)
-	token := jwt.New(jwt.SigningMethodHS256)
-	claims := token.Claims.(jwt.MapClaims)
-	claims["authorized"]=true
-	claims["email"]=email
-	claims["role"]=role
-	claims["expires"]=time.Now().Add(time.Minute *30).Unix()
-
-	tokenString,err := token.SignedString(mySigningKey)
-	if err != nil {
-		fmt.Errorf("Something went wrong :%s",err.Error())
-		return "",err
-	}
-	return tokenString,nil
+//A sample use
+var user = User{
+	ID:       1,
+	Username: "username",
+	Password: "password",
 }
 
-//Middleware function
-//check wether user is authorized or not
-func IsAuthorized(handler http.HandlerFunc) http.HandlerFunc{
-	return func(w http.ResponseWriter,r *http.Request){
-		if r.Header["Token"] == nil{
-			var err Error
-			err =SetError(err,"No Token found")
-			json.NewDecoder(w).Encode(err)
-			return
-		}
-		var mySigningKey = []byte(secretkey)
-
-		token,err := jwt.Parse(r.Header["Token"][0],func(token *jwt.Token)(interface{},error))
-	}
+type TokenDetails struct {
+	AccessToken  string
+	RefreshToken string
+	AtExpires    int64
+	RtExpires    int64
 }
 
-
-
-
-
-func SignUp(w http.ResponseWriter, r *http.Request) {
-	connection := GetDatabase()
-	defer Closedatabase(connection)
-
-	var user User
-	err := json.NewDecoder(r.Body).Decode(&user)
-	if err != nil {
-		var err Error
-		err = SetError (err, "Error reading body")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewDecoder(w).Encode(err)
+func Login(c *gin.Context) {
+	var u User
+	if err := c.ShouldBind(&u); err != nil {
+		c.JSON(http.StatusUnprocessableEntity, "Invalid json provided")
 		return
 	}
-
+	//compare the user from the request, with the one we defined:
+	if user.Username != u.Username || user.Password != u.Password {
+		c.JSON(http.StatusUnauthorized, "Please provide valid login details")
+		return
+	}
+	token, err := CreateToken(user.ID)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, token)
 }
-var dbuser User
-connection.Where("email=?", user.Email).First((&dbuser))
+func CreateToken(userid uint64) (*TokenDetails, error) {
+	td := &TokenDetails{}
+	td.AtExpires = time.Now().Add(time.Second * 60).Unix()
+	td.RtExpires = time.Now().Add(time.Minute * 1).Unix()
 
-//check if email is already register or not
-if dbuser.Email != ""{
 	var err error
-	err = SetError(err, "Email already registered")
-	w.Header().Set("Content-Type", "application/")
-	json.NewDecoder(w).Encode(err)
-	return
-}
+	//Creating Access Token
+	os.Setenv("ACCESS_SECRET", "jdnfksdmfksd")
+	atClaims := jwt.MapClaims{}
+	atClaims["authorized"] = true
+	atClaims["user_id"] = userid
+	atClaims["exp"] = td.AtExpires
+	at := jwt.NewWithClaims(jwt.SigningMethodHS256, atClaims)
+	td.AccessToken, err = at.SignedString([]byte(os.Getenv("ACCESS_SECRET")))
+	if err != nil {
+		return nil, err
+	}
+	os.Setenv("REFRESH_TOKEN", "adfsdfsdfasd")
+	rtClaims := jwt.MapClaims{}
+	rtClaims["authorized"] = true
+	rtClaims["user_id"] = userid
+	rtClaims["exp"] = td.RtExpires
+	rt := jwt.NewWithClaims(jwt.SigningMethodHS256, rtClaims)
+	td.RefreshToken, err = rt.SignedString([]byte(os.Getenv("REFRESH_TOKEN")))
+	if err != nil {
+		return nil, err
 
-user.Password,err = GeneratehashPassword(user.Password)
-if err != nil {
-	log.Fatal("Error in password hash")
-}
-
-//insert user details in database
-connection.Create(&user)
-w.Header().Set("Content-Type", "application/json")
-json.NewDecoder(w).Encode(user)
-
-func main() {
-	CreateRouter()
-	InitializeRoute()
-
+	}
+	return td, nil
 }
