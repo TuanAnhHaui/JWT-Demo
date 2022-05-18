@@ -1,20 +1,35 @@
 package main
 
 import (
+	"errors"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
 var (
-	router = gin.Default()
+	router          = gin.Default()
+	secretKey       = os.Getenv("JWT_SECRET")
+	ErrInvalidToken = errors.New("token is invalid")
+	ErrExpiredToken = errors.New("token has expired")
 )
+
+type Claims struct {
+	Payload TokenPayload `json:"payload"`
+	jwt.StandardClaims
+}
+type TokenPayload struct {
+	Id       int    `json:"id"`
+	UserName string `json:"user_name"`
+}
 
 func main() {
 	router.POST("/login", Login)
+	router.GET("/verify", VerifyToken)
 	log.Fatal(router.Run(":8080"))
 }
 
@@ -56,10 +71,34 @@ func Login(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, token)
 }
+func VerifyToken(c *gin.Context) {
+	//h := model.AuthHeader{}
+	var user User
+	header := c.GetHeader("Authorization")
+	//if err := c.ShouldBindHeader(&h); err != nil {
+	//	fmt.Println(err)
+	//}
+	tokenHeader := strings.Split(header, " ")
+	if tokenHeader[0] != "Bearer" || len(tokenHeader) < 2 || strings.TrimSpace(tokenHeader[1]) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid Authorization",
+		})
+		return
+	}
+	validate, err := user.VerifyToken(tokenHeader[1])
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid token",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, validate)
+}
+
 func CreateToken(userid uint64) (*TokenDetails, error) {
 	td := &TokenDetails{}
 	td.AtExpires = time.Now().Add(time.Second * 60).Unix()
-	td.RtExpires = time.Now().Add(time.Minute * 1).Unix()
+	td.RtExpires = time.Now().Add(time.Minute * 15).Unix()
 
 	var err error
 	//Creating Access Token
@@ -85,4 +124,29 @@ func CreateToken(userid uint64) (*TokenDetails, error) {
 
 	}
 	return td, nil
+}
+func (u User) VerifyToken(token string) (*TokenPayload, error) {
+	keyFunc := func(token *jwt.Token) (interface{}, error) {
+		_, ok := token.Method.(*jwt.SigningMethodHMAC)
+		if !ok {
+			return nil, ErrInvalidToken
+		}
+		return []byte(secretKey), nil
+	}
+
+	jwtToken, err := jwt.ParseWithClaims(token, &Claims{}, keyFunc)
+	if err != nil {
+		verr, ok := err.(*jwt.ValidationError)
+		if ok && errors.Is(verr.Inner, ErrExpiredToken) {
+			return nil, ErrExpiredToken
+		}
+		return nil, ErrInvalidToken
+	}
+
+	clamis, ok := jwtToken.Claims.(*Claims)
+	if !ok {
+		return nil, ErrInvalidToken
+	}
+
+	return &clamis.Payload, nil
 }
